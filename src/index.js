@@ -123,6 +123,7 @@ async function syncThreadToNotion(thread, { reason, forumChannel }) {
 		const cardCode = `${config.idPrefix}-${String(serial).padStart(config.idPadding, "0")}`;
 		const normalizedThreadTitle = thread.name.replace(/^\[[A-Za-z]-\d+\]\s*/u, "").trim();
 		const newThreadTitle = `[${cardCode}] ${normalizedThreadTitle}`;
+		const threadPostContent = await getThreadPostContent(thread);
 
 		const properties = {
 			[context.titlePropertyName]: {
@@ -147,7 +148,7 @@ async function syncThreadToNotion(thread, { reason, forumChannel }) {
 					object: "block",
 					type: "paragraph",
 					paragraph: {
-						rich_text: [{ type: "text", text: { content: `Discord thread: ${thread.url}` } }]
+						rich_text: [{ type: "text", text: { content: threadPostContent } }]
 					}
 				}
 			]
@@ -167,6 +168,17 @@ async function syncThreadToNotion(thread, { reason, forumChannel }) {
 	} finally {
 		inFlightThreadIds.delete(thread.id);
 	}
+}
+
+async function getThreadPostContent(thread) {
+	const starterMessage = await thread.fetchStarterMessage().catch(() => null);
+	const content = starterMessage?.content?.trim();
+
+	if (content) {
+		return content;
+	}
+
+	return "";
 }
 
 async function getNotionContext() {
