@@ -82,9 +82,7 @@ discord.on(Events.InteractionCreate, async interaction => {
 	});
 });
 
-await discord.login(config.discordToken);
-
-async function backfillUnsyncedThreads(client) {
+const backfillUnsyncedThreads = async client => {
 	const channel = await getForumChannel(client);
 	if (!channel || channel.type !== ChannelType.GuildForum) {
 		throw new Error("DISCORD_FORUM_CHANNEL_ID is not a forum channel");
@@ -103,9 +101,9 @@ async function backfillUnsyncedThreads(client) {
 	for (const thread of allThreads.values()) {
 		await syncThreadToNotion(thread, { reason: "startup_backfill", forumChannel: channel });
 	}
-}
+};
 
-async function syncThreadToNotion(thread, { reason, forumChannel }) {
+const syncThreadToNotion = async (thread, { reason, forumChannel }) => {
 	if (inFlightThreadIds.has(thread.id)) {
 		return;
 	}
@@ -190,9 +188,9 @@ async function syncThreadToNotion(thread, { reason, forumChannel }) {
 	} finally {
 		inFlightThreadIds.delete(thread.id);
 	}
-}
+};
 
-async function handleStatusCommand(interaction) {
+const handleStatusCommand = async interaction => {
 	await interaction.deferReply({ ephemeral: true });
 
 	const forumChannel = await getForumChannel(interaction.client);
@@ -220,9 +218,9 @@ async function handleStatusCommand(interaction) {
 
 	await syncThreadToNotion(updatedThread, { reason: "status_command", forumChannel });
 	await interaction.editReply({ content: `已同步狀態為 **${statusName}**，已建立並更新 Notion 卡片。` });
-}
+};
 
-async function ensureSlashCommands(client) {
+const ensureSlashCommands = async client => {
 	const forumChannel = await getForumChannel(client);
 	const commandPayload = {
 		name: STATUS_COMMAND_NAME,
@@ -251,9 +249,9 @@ async function ensureSlashCommands(client) {
 	if (existing.description !== commandPayload.description || existingChoices !== expectedChoices) {
 		await existing.edit(commandPayload);
 	}
-}
+};
 
-async function applyStatusTagToThread({ thread, statusName, statusTagIds }) {
+const applyStatusTagToThread = async ({ thread, statusName, statusTagIds }) => {
 	const statusTagId = statusTagIds.get(statusName);
 	if (!statusTagId) {
 		throw new Error(`Missing forum tag for status: ${statusName}`);
@@ -264,9 +262,9 @@ async function applyStatusTagToThread({ thread, statusName, statusTagIds }) {
 	const nextTagIds = [...new Set([...nonStatusTagIds, statusTagId])];
 
 	return thread.setAppliedTags(nextTagIds);
-}
+};
 
-async function syncThreadMetadataToNotion({ thread, forumChannel, desiredStatusName }) {
+const syncThreadMetadataToNotion = async ({ thread, forumChannel, desiredStatusName }) => {
 	const context = await getNotionContext();
 	const notionPage = await findNotionPageByThreadUrl({
 		dataSourceId: context.dataSourceId,
@@ -301,9 +299,9 @@ async function syncThreadMetadataToNotion({ thread, forumChannel, desiredStatusN
 	});
 
 	return true;
-}
+};
 
-async function findNotionPageByThreadUrl({ dataSourceId, threadUrl }) {
+const findNotionPageByThreadUrl = async ({ dataSourceId, threadUrl }) => {
 	const response = await notion.dataSources.query({
 		data_source_id: dataSourceId,
 		filter: {
@@ -314,9 +312,9 @@ async function findNotionPageByThreadUrl({ dataSourceId, threadUrl }) {
 	});
 
 	return response.results[0] ?? null;
-}
+};
 
-async function getThreadPostContent(thread) {
+const getThreadPostContent = async thread => {
 	const starterMessage = await thread.fetchStarterMessage().catch(() => null);
 	const content = starterMessage?.content?.trim();
 
@@ -325,9 +323,9 @@ async function getThreadPostContent(thread) {
 	}
 
 	return "";
-}
+};
 
-async function getNotionContext() {
+const getNotionContext = async () => {
 	if (!notionContextPromise) {
 		notionContextPromise = (async () => {
 			const database = await notion.databases.retrieve({
@@ -364,9 +362,9 @@ async function getNotionContext() {
 	}
 
 	return notionContextPromise;
-}
+};
 
-async function isThreadAlreadySynced({ thread, context }) {
+const isThreadAlreadySynced = async ({ thread, context }) => {
 	const response = await notion.dataSources.query({
 		data_source_id: context.dataSourceId,
 		filter: {
@@ -377,9 +375,9 @@ async function isThreadAlreadySynced({ thread, context }) {
 	});
 
 	return response.results.length > 0;
-}
+};
 
-async function getNextSerial({ notion, dataSourceId, titlePropertyName, idPrefix }) {
+const getNextSerial = async ({ notion, dataSourceId, titlePropertyName, idPrefix }) => {
 	const regex = new RegExp(`^\\[${escapeRegExp(idPrefix)}-(\\d+)\\]`, "u");
 	let cursor;
 	let max = 0;
@@ -417,12 +415,13 @@ async function getNextSerial({ notion, dataSourceId, titlePropertyName, idPrefix
 	} while (cursor);
 
 	return max + 1;
-}
-function escapeRegExp(text) {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+};
 
-async function ensureNotionProperties(dataSourceId) {
+const escapeRegExp = text => {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+};
+
+const ensureNotionProperties = async dataSourceId => {
 	const dataSource = await notion.dataSources.retrieve({ data_source_id: dataSourceId });
 	const patch = {};
 
@@ -458,9 +457,9 @@ async function ensureNotionProperties(dataSourceId) {
 			properties: patch
 		});
 	}
-}
+};
 
-function assertPropertyType(properties, propertyName, expectedType) {
+const assertPropertyType = (properties, propertyName, expectedType) => {
 	const property = properties[propertyName];
 	if (!property) {
 		throw new Error(`Property not found in Notion data source: ${propertyName}`);
@@ -469,9 +468,9 @@ function assertPropertyType(properties, propertyName, expectedType) {
 	if (property.type !== expectedType) {
 		throw new Error(`Property ${propertyName} must be type ${expectedType}, got ${property.type}`);
 	}
-}
+};
 
-async function getForumStatusTagIds(client) {
+const getForumStatusTagIds = async client => {
 	if (!forumStatusTagIdsPromise) {
 		forumStatusTagIdsPromise = (async () => {
 			const forumChannel = await getForumChannel(client);
@@ -498,23 +497,23 @@ async function getForumStatusTagIds(client) {
 	}
 
 	return forumStatusTagIdsPromise;
-}
+};
 
-async function getForumChannel(client) {
+const getForumChannel = async client => {
 	const channel = await client.channels.fetch(config.forumChannelId);
 	if (!channel || channel.type !== ChannelType.GuildForum) {
 		throw new Error("DISCORD_FORUM_CHANNEL_ID is not a forum channel");
 	}
 
 	return channel;
-}
+};
 
-function getAppliedTagNames(thread, forumChannel) {
+const getAppliedTagNames = (thread, forumChannel) => {
 	const tagsById = new Map(forumChannel.availableTags.map(tag => [tag.id, tag.name]));
 	return thread.appliedTags.map(tagId => tagsById.get(tagId)).filter(Boolean);
-}
+};
 
-function getSyncErrorText(error, reason) {
+const getSyncErrorText = (error, reason) => {
 	const base = "建立 Notion 卡片失敗，請檢查 bot 設定與權限。";
 	if (!error || typeof error !== "object") {
 		return base;
@@ -529,4 +528,6 @@ function getSyncErrorText(error, reason) {
 	}
 
 	return base;
-}
+};
+
+await discord.login(config.discordToken);
