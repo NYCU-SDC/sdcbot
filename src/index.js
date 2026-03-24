@@ -1,12 +1,13 @@
 import "dotenv/config";
 
 import { Client as NotionClient } from "@notionhq/client";
-import { ChannelType, Client as DiscordClient, Events, GatewayIntentBits } from "discord.js";
+import { ApplicationCommandOptionType, ChannelType, Client as DiscordClient, Events, GatewayIntentBits } from "discord.js";
 
 const NOTION_TAGS_PROPERTY = "Tags";
 const NOTION_THREAD_URL_PROPERTY = "Discord URL";
 const NOTION_STATUS_PROPERTY = "Status";
 const STATUS_OPTIONS = ["To-Do", "In Progress", "Completed"];
+const STATUS_COMMAND_NAME = "s";
 
 const requiredEnvVars = ["DISCORD_TOKEN", "DISCORD_FORUM_CHANNEL_ID", "NOTION_TOKEN", "NOTION_DATABASE_ID"];
 
@@ -39,6 +40,10 @@ const notion = new NotionClient({ auth: config.notionToken });
 discord.once(Events.ClientReady, async client => {
 	console.log(`Discord bot logged in as ${client.user.tag}`);
 
+	await ensureSlashCommands(client).catch(error => {
+		console.error("Failed to ensure slash commands:", error);
+	});
+
 	await getForumStatusTagIds(client).catch(error => {
 		console.error("Failed to ensure forum status tags:", error);
 	});
@@ -58,6 +63,23 @@ discord.on(Events.ThreadCreate, async (thread, newlyCreated) => {
 	}
 
 	await syncThreadToNotion(thread, { reason: "thread_created", forumChannel: thread.parent });
+});
+
+discord.on(Events.InteractionCreate, async interaction => {
+	if (!interaction.isChatInputCommand() || interaction.commandName !== STATUS_COMMAND_NAME) {
+		return;
+	}
+
+	await handleStatusCommand(interaction).catch(async error => {
+		console.error("Failed to process /s command:", error);
+		const content = "更新狀態失敗，請稍後重試。";
+		if (interaction.deferred || interaction.replied) {
+			await interaction.editReply({ content }).catch(() => undefined);
+			return;
+		}
+
+		await interaction.reply({ content, ephemeral: true }).catch(() => undefined);
+	});
 });
 
 await discord.login(config.discordToken);
@@ -170,6 +192,130 @@ async function syncThreadToNotion(thread, { reason, forumChannel }) {
 	}
 }
 
+async function handleStatusCommand(interaction) {
+	await interaction.deferReply({ ephemeral: true });
+
+	const forumChannel = await getForumChannel(interaction.client);
+	const thread = interaction.channel;
+
+	if (!thread || !thread.isThread() || thread.parentId !== forumChannel.id) {
+		await interaction.editReply({ content: "請在指定 forum 的貼文串內使用 `/s`。" });
+		return;
+	}
+
+	const statusName = interaction.options.getString("status", true);
+	const statusTagIds = await getForumStatusTagIds(interaction.client);
+	const updatedThread = await applyStatusTagToThread({ thread, statusName, statusTagIds });
+
+	const synced = await syncThreadMetadataToNotion({
+		thread: updatedThread,
+		forumChannel,
+		desiredStatusName: statusName
+	});
+
+	if (synced) {
+		await interaction.editReply({ content: `已同步狀態為 **${statusName}**，並更新 Discord / Notion。` });
+		return;
+	}
+
+	await syncThreadToNotion(updatedThread, { reason: "status_command", forumChannel });
+	await interaction.editReply({ content: `已同步狀態為 **${statusName}**，已建立並更新 Notion 卡片。` });
+}
+
+async function ensureSlashCommands(client) {
+	const forumChannel = await getForumChannel(client);
+	const commandPayload = {
+		name: STATUS_COMMAND_NAME,
+		description: "同步狀態到 Discord 與 Notion",
+		options: [
+			{
+				type: ApplicationCommandOptionType.String,
+				name: "status",
+				description: "選擇要套用的狀態",
+				required: true,
+				choices: STATUS_OPTIONS.map(name => ({ name, value: name }))
+			}
+		]
+	};
+
+	const existingCommands = await forumChannel.guild.commands.fetch();
+	const existing = existingCommands.find(command => command.name === STATUS_COMMAND_NAME);
+
+	if (!existing) {
+		await forumChannel.guild.commands.create(commandPayload);
+		return;
+	}
+
+	const existingChoices = existing.options[0]?.choices?.map(choice => choice.value).join("|");
+	const expectedChoices = STATUS_OPTIONS.join("|");
+	if (existing.description !== commandPayload.description || existingChoices !== expectedChoices) {
+		await existing.edit(commandPayload);
+	}
+}
+
+async function applyStatusTagToThread({ thread, statusName, statusTagIds }) {
+	const statusTagId = statusTagIds.get(statusName);
+	if (!statusTagId) {
+		throw new Error(`Missing forum tag for status: ${statusName}`);
+	}
+
+	const allStatusTagIds = new Set(statusTagIds.values());
+	const nonStatusTagIds = thread.appliedTags.filter(tagId => !allStatusTagIds.has(tagId));
+	const nextTagIds = [...new Set([...nonStatusTagIds, statusTagId])];
+
+	return thread.setAppliedTags(nextTagIds);
+}
+
+async function syncThreadMetadataToNotion({ thread, forumChannel, desiredStatusName }) {
+	const context = await getNotionContext();
+	const notionPage = await findNotionPageByThreadUrl({
+		dataSourceId: context.dataSourceId,
+		threadUrl: thread.url
+	});
+
+	if (!notionPage) {
+		return false;
+	}
+
+	const appliedTagNames = getAppliedTagNames(thread, forumChannel);
+	const statusName = desiredStatusName ?? appliedTagNames.find(name => STATUS_OPTIONS.includes(name)) ?? "To-Do";
+	const effectiveStatus = context.statusOptionNames.includes(statusName) ? statusName : (context.statusOptionNames[0] ?? "To-Do");
+	const contentTagNames = appliedTagNames.filter(name => !STATUS_OPTIONS.includes(name));
+
+	await notion.pages.update({
+		page_id: notionPage.id,
+		properties: {
+			[context.titlePropertyName]: {
+				title: [{ text: { content: thread.name } }]
+			},
+			[NOTION_TAGS_PROPERTY]: {
+				multi_select: contentTagNames.map(name => ({ name }))
+			},
+			[NOTION_STATUS_PROPERTY]: {
+				status: { name: effectiveStatus }
+			},
+			[NOTION_THREAD_URL_PROPERTY]: {
+				url: thread.url
+			}
+		}
+	});
+
+	return true;
+}
+
+async function findNotionPageByThreadUrl({ dataSourceId, threadUrl }) {
+	const response = await notion.dataSources.query({
+		data_source_id: dataSourceId,
+		filter: {
+			property: NOTION_THREAD_URL_PROPERTY,
+			url: { equals: threadUrl }
+		},
+		page_size: 1
+	});
+
+	return response.results[0] ?? null;
+}
+
 async function getThreadPostContent(thread) {
 	const starterMessage = await thread.fetchStarterMessage().catch(() => null);
 	const content = starterMessage?.content?.trim();
@@ -221,10 +367,6 @@ async function getNotionContext() {
 }
 
 async function isThreadAlreadySynced({ thread, context }) {
-	if (hasCardPrefix(thread.name)) {
-		return true;
-	}
-
 	const response = await notion.dataSources.query({
 		data_source_id: context.dataSourceId,
 		filter: {
@@ -278,10 +420,6 @@ async function getNextSerial({ notion, dataSourceId, titlePropertyName, idPrefix
 }
 function escapeRegExp(text) {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function hasCardPrefix(title) {
-	return /^\[[A-Za-z]-\d+\]\s*/u.test(title);
 }
 
 async function ensureNotionProperties(dataSourceId) {
